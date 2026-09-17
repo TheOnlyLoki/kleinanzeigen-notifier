@@ -19,6 +19,7 @@ async def get_inserate_ultra_optimized(
     radius: int = Query(None, description="Search radius in kilometers"),
     min_price: int = Query(None, description="Minimum price filter"),
     max_price: int = Query(None, description="Maximum price filter"),
+    category_id: int = Query(None, description="Kleinanzeigen category id, e.g. 216 for Autos"),
     page_count: int = Query(1, ge=1, le=20, description="Number of pages to fetch"),
     min_publish_date: Optional[datetime] = Query(
         None,
@@ -45,6 +46,7 @@ async def get_inserate_ultra_optimized(
             radius=radius,
             min_price=min_price,
             max_price=max_price,
+            category_id=category_id,
             page_count=page_count,
             min_publish_date=min_publish_date,
         )

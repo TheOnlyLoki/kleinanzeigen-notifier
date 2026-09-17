@@ -180,9 +180,23 @@ class UltraOptimizedScraper:
             title_task = self._get_text_content(
                 article, "h2.text-module-begin a.ellipsis"
             )
-            price_task = self._get_text_content(
-                article,
-                "p.aditem-main--middle--price-shipping--price, [class*='price']",
+            # No class name reliably marks the price element anymore (the
+            # site's markup moved to non-semantic utility classes), and
+            # unlike title there's no JSON-LD fallback with a price field -
+            # so find it by content instead: the price is the only leaf node
+            # in the card whose text contains "€".
+            price_task = article.evaluate(
+                """
+                (el) => {
+                    const nodes = el.querySelectorAll('p, span, div');
+                    for (const node of nodes) {
+                        if (node.children.length === 0 && node.textContent && node.textContent.includes('€')) {
+                            return node.textContent.trim();
+                        }
+                    }
+                    return "";
+                }
+                """
             )
             desc_task = self._get_text_content(
                 article, "p.aditem-main--middle--description"
@@ -437,6 +451,7 @@ class UltraOptimizedScraper:
         radius: int = None,
         min_price: int = None,
         max_price: int = None,
+        category_id: int = None,
         page_count: int = 1,
         min_publish_date: datetime = None,
     ) -> Dict[str, Any]:
@@ -456,17 +471,17 @@ class UltraOptimizedScraper:
         with error_handling_context(
             operation="ultra_multi_page_scrape", logger=logger
         ) as ctx:
-            # Build URLs efficiently
-            base_url = "https://www.kleinanzeigen.de"
-
-            # Optimized URL building
-            price_path = ""
-            if min_price is not None or max_price is not None:
-                min_str = str(min_price) if min_price is not None else ""
-                max_str = str(max_price) if max_price is not None else ""
-                price_path = f"/preis:{min_str}:{max_str}"
-
-            search_path = f"{price_path}/s-seite:{{page}}"
+            # Build URLs efficiently.
+            #
+            # The old "/preis:{min}:{max}/s-seite:{page}?keywords=..." path
+            # layout 404s on the current site for *any* price-filtered search
+            # (verified live - it's not a query-encoding issue, Kleinanzeigen
+            # just doesn't route that path shape anymore). The site's own
+            # search form still accepts a flat query string against
+            # /s-suchanfrage.html, including minPrice/maxPrice and a pageNum
+            # param for pagination, and renders/redirects correctly for both
+            # filtered and unfiltered searches - so that's used unconditionally.
+            base_url = "https://www.kleinanzeigen.de/s-suchanfrage.html"
 
             params = {}
             if query:
@@ -475,13 +490,14 @@ class UltraOptimizedScraper:
                 params["locationStr"] = location
             if radius:
                 params["radius"] = radius
+            if min_price is not None:
+                params["minPrice"] = min_price
+            if max_price is not None:
+                params["maxPrice"] = max_price
+            if category_id is not None:
+                params["categoryId"] = category_id
 
-            param_string = f"?{urlencode(params)}" if params else ""
-            search_url = (
-                base_url
-                + search_path.format(price_path=price_path, page="{page}")
-                + param_string
-            )
+            search_url = base_url + f"?{urlencode(params)}&pageNum={{page}}"
 
             # Create page fetch tasks
             async def create_page_task(page_num: int):
@@ -642,6 +658,7 @@ async def ultra_optimized_scrape_inserate(
     radius: int = None,
     min_price: int = None,
     max_price: int = None,
+    category_id: int = None,
     page_count: int = 1,
     min_publish_date: datetime = None,
 ) -> Dict[str, Any]:
@@ -664,6 +681,7 @@ async def ultra_optimized_scrape_inserate(
             radius=radius,
             min_price=min_price,
             max_price=max_price,
+            category_id=category_id,
             page_count=page_count,
             min_publish_date=min_publish_date,
         )

@@ -6,6 +6,7 @@
 watches:
   - name: "BMW E46"
     query: "BMW E46"
+    category_id: 216         # Auto - excludes parts/accessories listings. See notifier/commands.py CATEGORY_LABELS for others, or add via chat with /add
     location: "12345"
     radius: 30               # km - allowed steps: 5,10,20,30,50,100,150,200
     min_price: 500

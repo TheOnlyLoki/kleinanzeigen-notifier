@@ -20,6 +20,7 @@ async def _watch_loop(
     browser_manager: OptimizedPlaywrightManager,
     watch: WatchConfig,
     store: SeenAdsStore,
+    lock: asyncio.Lock,
     telegram: Optional[TelegramClient],
     default_chat_id: Optional[str],
 ) -> None:
@@ -27,7 +28,8 @@ async def _watch_loop(
 
     while True:
         try:
-            events = await run_watch_once(browser_manager, watch, store)
+            async with lock:
+                events = await run_watch_once(browser_manager, watch, store)
             for event in events:
                 logger.info(f"[{watch.name}] {event.kind}: {event.listing.get('title')}")
                 if telegram and chat_id:
@@ -47,6 +49,8 @@ async def _watch_loop(
 class NotifierService:
     def __init__(self) -> None:
         self._tasks: Dict[str, asyncio.Task] = {}
+        self._stores: Dict[str, SeenAdsStore] = {}
+        self._locks: Dict[str, asyncio.Lock] = {}
         self.config: Optional[AppConfig] = None
         self.telegram: Optional[TelegramClient] = None
         self._browser_manager: Optional[OptimizedPlaywrightManager] = None
@@ -65,9 +69,17 @@ class NotifierService:
 
     def _spawn(self, watch: WatchConfig) -> None:
         store = SeenAdsStore(watch.name)
+        lock = asyncio.Lock()
+        self._stores[watch.name] = store
+        self._locks[watch.name] = lock
         task = asyncio.create_task(
             _watch_loop(
-                self._browser_manager, watch, store, self.telegram, self.config.telegram_chat_id
+                self._browser_manager,
+                watch,
+                store,
+                lock,
+                self.telegram,
+                self.config.telegram_chat_id,
             ),
             name=f"watch:{watch.name}",
         )
@@ -76,6 +88,17 @@ class NotifierService:
 
     def list_watches(self) -> List[WatchConfig]:
         return list(self.config.watches) if self.config else []
+
+    async def poll_watch(self, name: str):
+        """Run one watch immediately (e.g. from /poll), sharing its seen-ads
+        state with the scheduled loop so this doesn't cause duplicate
+        'new_listing' events on the next scheduled run."""
+        watch = next((w for w in self.config.watches if w.name == name), None)
+        if watch is None:
+            raise ValueError(f"No such watch: {name}")
+
+        async with self._locks[name]:
+            return await run_watch_once(self._browser_manager, watch, self._stores[name])
 
     async def add_watch(self, watch: WatchConfig) -> None:
         if watch.name in self._tasks:
@@ -97,6 +120,8 @@ class NotifierService:
 
         self.config.watches = [w for w in self.config.watches if w.name != name]
         save_config(self.config)
+        self._stores.pop(name, None)
+        self._locks.pop(name, None)
         return True
 
     async def stop(self) -> None:

@@ -46,6 +46,7 @@ async def run_watch_once(
         radius=watch.radius,
         min_price=watch.min_price,
         max_price=watch.max_price,
+        category_id=watch.category_id,
         page_count=watch.page_count,
     )
 

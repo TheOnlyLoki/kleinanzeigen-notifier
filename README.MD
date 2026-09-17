@@ -590,7 +590,8 @@ Two files, neither committed to git:
 watches:
   - name: "BMW E46"
     query: "BMW E46"
-    location: "82297"       # PLZ or place name
+    category_id: 216          # Auto - excludes parts/accessories. See notifier/commands.py CATEGORY_LABELS for others
+    location: "12345"         # PLZ or place name
     radius: 30                # km - allowed steps: 5,10,20,30,50,100,150,200
     min_price: 500
     max_price: 3500
@@ -616,10 +617,14 @@ Once `TELEGRAM_CHAT_ID` is set, that chat can manage watches directly - no
 manual `config.yaml` editing needed:
 
 - **`/list`** - show all configured watches
-- **`/add`** - guided, step-by-step: asks for name, keywords, location,
-  radius, price range, and check interval, then starts watching immediately
+- **`/add`** - guided, step-by-step: asks for name, keywords, category,
+  location, radius, price range, and check interval, then starts watching
+  immediately. Category accepts a friendly name (auto, motorrad, fahrrad, ...)
+  or a raw kleinanzeigen.de category id
 - **`/delete <number|name>`** - remove a watch (number from `/list`, or its
   exact name)
+- **`/poll [number|name]`** - scrape right now instead of waiting for the
+  interval; polls every watch if no argument is given
 - **`/cancel`** - abort an in-progress `/add`
 - **`/help`** - list commands
 

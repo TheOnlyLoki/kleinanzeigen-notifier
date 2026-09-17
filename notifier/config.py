@@ -22,6 +22,7 @@ class WatchConfig(BaseModel):
     radius: Optional[int] = None
     min_price: Optional[int] = None
     max_price: Optional[int] = None
+    category_id: Optional[int] = None
     page_count: int = 1
     interval_minutes: int = 15
     notify_on: List[NotifyKind] = Field(default_factory=lambda: ["new_listing", "price_drop"])
