@@ -1,0 +1,20 @@
+# Copy this file to config.yaml and adjust.
+# config.yaml is gitignored (it can reveal your search location), so deploy
+# it alongside .env - e.g. scp both to the Pi, or mount them as volumes.
+# Telegram secrets never go in here - they live in .env.
+
+watches:
+  - name: "BMW E46"
+    query: "BMW E46"
+    location: "82297"       # PLZ or place name
+    radius: 30               # km - allowed steps: 5,10,20,30,50,100,150,200
+    min_price: 500
+    max_price: 3500
+    page_count: 1            # search result pages to scan per run
+    interval_minutes: 15     # how often this watch is polled
+    notify_on:
+      - new_listing
+      - price_drop
+    # chat_id: "123456789"   # optional: override TELEGRAM_CHAT_ID for just this watch
+
+  # Add more watches here, each with its own query/interval/chat_id.

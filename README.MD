@@ -1,5 +1,12 @@
 # Ebay Kleinanzeigen API
 
+> **This fork** turns the API below into a self-hosted **Telegram notifier**:
+> configure one or more saved searches, get pinged when a matching listing
+> appears or drops in price, and run the whole thing on a Raspberry Pi via
+> Docker Compose with CI/CD already wired up. See [Telegram Notifier](#telegram-notifier)
+> below for setup; everything else on this page describes the underlying
+> scraping API it's built on.
+
 <div align="center">
   <h3 align="center">Ebay Kleinanzeigen API</h3>
 
@@ -94,19 +101,21 @@ HEADLESS=false uv run uvicorn main:app --reload
 
 ### Installation using Docker
 
-1. Build the Docker image
+This fork's image is Alpine-based and connects to Chromium over the DevTools
+protocol (CDP) rather than bundling a browser itself (Playwright doesn't
+support Alpine/musl directly - see [Telegram Notifier](#telegram-notifier)
+for why). Because of that it needs a companion browser container, so it's
+distributed as a `docker-compose.yml` rather than a single `docker run`:
 
 ```sh
-docker build -t ebay-kleinanzeigen-api .
+cp config.example.yaml config.yaml   # edit with your search(es)
+cp .env.example .env                 # add your Telegram bot token
+docker compose up -d
 ```
 
-2. Run the Docker container
-
-```sh
-docker run -p 8000:8000 ebay-kleinanzeigen-api
-```
-
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:8000`. If you only want the
+scraping API (no notifier), leave `config.yaml` absent/empty - the notifier
+loops simply won't start.
 
 ### API Endpoints
 
@@ -556,6 +565,103 @@ The `/inserate-detailed` response additionally nests a `details` object inside e
   }
 }
 ```
+
+## Telegram Notifier
+
+This fork adds a background notifier on top of the scraping API: define one
+or more saved searches ("watches") in `config.yaml`, and it polls each on its
+own interval, comparing results against what it's already seen, and sends a
+Telegram message for:
+
+- **`new_listing`** - a listing matching the watch's filters that wasn't seen before
+- **`price_drop`** - a previously-seen listing whose price has gone down
+
+More notification kinds can be added the same way (`notifier/watchers.py` is
+where that comparison logic lives).
+
+### Configuration
+
+Two files, neither committed to git:
+
+- **`config.yaml`** (copy from `config.example.yaml`) - your watches. No secrets.
+- **`.env`** (copy from `.env.example`) - `TELEGRAM_BOT_TOKEN` and a default `TELEGRAM_CHAT_ID`.
+
+```yaml
+watches:
+  - name: "BMW E46"
+    query: "BMW E46"
+    location: "82297"       # PLZ or place name
+    radius: 30                # km - allowed steps: 5,10,20,30,50,100,150,200
+    min_price: 500
+    max_price: 3500
+    page_count: 1
+    interval_minutes: 15
+    notify_on: [new_listing, price_drop]
+    # chat_id: "123456789"  # optional per-watch override
+```
+
+Seen-ad state is kept per watch as a small JSON file under `data/` (mounted
+as a volume in `docker-compose.yml`), so it survives restarts/redeploys.
+
+### Getting a Telegram chat_id
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) and grab its token into `.env`.
+2. Open a chat with your bot in Telegram and send it any message (e.g. `/start`).
+3. Fetch `https://api.telegram.org/bot<TOKEN>/getUpdates` - the reply contains
+   your `chat.id`. Put that in `.env` as `TELEGRAM_CHAT_ID` (or per-watch).
+
+### Why Alpine works here despite Playwright not supporting it
+
+Playwright's Python package has no official Alpine/musl support: its browser
+downloads and its bundled Node "driver" binary are glibc-only. This image
+sidesteps both problems instead of fighting them:
+
+- **No local browser.** `docker-compose.yml` runs Chromium in its own
+  `zenika/alpine-chrome` sidecar container; the app connects to it remotely
+  over the DevTools protocol (`BROWSER_CDP_URL`, already supported by
+  `utils/browser.py`). The app image never launches or bundles a browser.
+- **No bundled Node driver.** The `playwright` pip package is pure Python +
+  JS with one glibc-linked `node` executable inside it. The Dockerfile
+  installs Alpine's own musl-native `nodejs` via `apk` and points
+  `PLAYWRIGHT_NODEJS_PATH` at it, so that embedded binary is simply never
+  run. `greenlet` (Playwright's other native dependency) does publish real
+  musllinux wheels, so it installs normally.
+
+This was validated end-to-end locally (multi-arch, including emulated
+arm64) before landing: driver handshake, then an actual scrape against the
+live site through the sidecar container. Net effect: a ~390MB app image
+instead of ~2.4GB, and code changes only rebuild/push that small image - the
+browser sidecar is pulled once from Docker Hub and rarely changes.
+
+### Deploying to a Raspberry Pi
+
+```sh
+git clone <your fork>
+cd kleinanzeigen-notifier
+cp config.example.yaml config.yaml   # edit
+cp .env.example .env                 # add your token
+docker compose up -d
+```
+
+CI (`.github/workflows/ci.yml`) builds and pushes a multi-arch
+(`linux/amd64` + `linux/arm64`) image to GHCR on every push to `main`, so the
+Pi pulls a native arm64 image rather than emulating amd64.
+
+**One-time GHCR step:** packages pushed via `GITHUB_TOKEN` default to
+*private*. Either make the package public (repo → Packages → package
+settings → Change visibility), or `docker login ghcr.io` on the Pi with a
+personal access token that has `read:packages`, so both `docker compose pull`
+and Watchtower (below) can fetch it.
+
+### Continuous deployment
+
+`docker-compose.yml` includes a [Watchtower](https://containrrr.dev/watchtower/)
+service that polls GHCR every 30 minutes and redeploys the `app` container
+when a new image digest appears - no inbound access to the Pi required,
+which is what makes it a better fit here than a webhook/SSH-triggered
+redeploy. It's scoped to only the `app` service via
+`com.centurylinklabs.watchtower.enable=true`, so it won't touch unrelated
+containers on the Pi.
 
 ## Performance Features
 

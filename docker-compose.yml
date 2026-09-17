@@ -1,0 +1,49 @@
+services:
+  chrome:
+    image: zenika/alpine-chrome:latest
+    command:
+      - --no-sandbox
+      - --headless
+      - --disable-gpu
+      - --remote-debugging-address=0.0.0.0
+      - --remote-debugging-port=9222
+    restart: unless-stopped
+    networks:
+      appnet:
+        ipv4_address: 172.28.0.10
+
+  app:
+    image: ghcr.io/theonlyloki/kleinanzeigen-notifier:latest
+    # build: .   # uncomment to build locally instead of pulling from GHCR
+    depends_on:
+      - chrome
+    environment:
+      BROWSER_CDP_URL: http://172.28.0.10:9222
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro,Z
+      - ./data:/app/data:Z
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - appnet
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  # CD: polls GHCR for a newer image digest and redeploys `app` automatically -
+  # no inbound access to the Pi needed. Only touches containers labeled above.
+  # See README for the one-time step of making the GHCR package pullable.
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 1800 --cleanup --label-enable
+    restart: unless-stopped
+
+networks:
+  appnet:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

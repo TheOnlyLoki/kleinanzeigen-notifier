@@ -69,3 +69,7 @@ coverage.xml
 # Project specific
 .pytest_cache/
 .ruff_cache/
+
+# Notifier: personal search config + seen-ads state, never commit
+config.yaml
+data/

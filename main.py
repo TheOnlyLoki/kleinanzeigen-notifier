@@ -10,15 +10,17 @@ from routers import (
 )
 from utils.browser import OptimizedPlaywrightManager
 from utils.asyncio_optimizations import EventLoopOptimizer
+from notifier.service import NotifierService
 
 # Global browser manager instance for sharing across all endpoints
 browser_manager = None
+notifier_service = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown events"""
-    global browser_manager
+    global browser_manager, notifier_service
 
     # Setup uvloop for maximum performance (2-4x improvement)
     uvloop_enabled = EventLoopOptimizer.setup_uvloop()
@@ -34,9 +36,15 @@ async def lifespan(app: FastAPI):
     app.state.browser_manager = browser_manager
     app.state.uvloop_enabled = uvloop_enabled
 
+    # Start notifier watch loops (no-op if config.yaml is absent)
+    notifier_service = NotifierService()
+    notifier_service.start(browser_manager)
+
     yield
 
-    # Shutdown: Clean up browser resources
+    # Shutdown: stop notifier loops, then clean up browser resources
+    if notifier_service:
+        await notifier_service.stop()
     if browser_manager:
         await browser_manager.close()
 

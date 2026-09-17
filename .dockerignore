@@ -9,3 +9,7 @@ tests/
 *.md
 .claude/
 uv.lock
+.venv/
+.env
+data/
+config.yaml
