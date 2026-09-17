@@ -13,7 +13,7 @@ services:
         ipv4_address: 172.28.0.10
 
   app:
-    image: ghcr.io/theonlyloki/kleinanzeigen-notifier:latest
+    image: ghcr.io/theonlyloki/kleinanzeigen-notifier:main
     # build: .   # uncomment to build locally instead of pulling from GHCR
     depends_on:
       - chrome
@@ -22,7 +22,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./config.yaml:/app/config.yaml:ro,Z
+      # writable: /add and /delete in Telegram persist changes back here
+      - ./config.yaml:/app/config.yaml:Z
       - ./data:/app/data:Z
     ports:
       - "8000:8000"

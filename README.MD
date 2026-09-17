@@ -610,6 +610,27 @@ as a volume in `docker-compose.yml`), so it survives restarts/redeploys.
 3. Fetch `https://api.telegram.org/bot<TOKEN>/getUpdates` - the reply contains
    your `chat.id`. Put that in `.env` as `TELEGRAM_CHAT_ID` (or per-watch).
 
+### Managing watches from Telegram
+
+Once `TELEGRAM_CHAT_ID` is set, that chat can manage watches directly - no
+manual `config.yaml` editing needed:
+
+- **`/list`** - show all configured watches
+- **`/add`** - guided, step-by-step: asks for name, keywords, location,
+  radius, price range, and check interval, then starts watching immediately
+- **`/delete <number|name>`** - remove a watch (number from `/list`, or its
+  exact name)
+- **`/cancel`** - abort an in-progress `/add`
+- **`/help`** - list commands
+
+Changes are written straight back to `config.yaml` (hence that volume is
+mounted read-write) and take effect immediately - no restart required.
+Only the chat matching `TELEGRAM_CHAT_ID` is accepted; commands from any
+other chat are logged and ignored, since the bot's username is publicly
+findable on Telegram.
+
+### Why Alpine works here despite Playwright not supporting it
+
 ### Why Alpine works here despite Playwright not supporting it
 
 Playwright's Python package has no official Alpine/musl support: its browser

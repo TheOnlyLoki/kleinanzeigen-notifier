@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from routers import (
@@ -11,16 +12,18 @@ from routers import (
 from utils.browser import OptimizedPlaywrightManager
 from utils.asyncio_optimizations import EventLoopOptimizer
 from notifier.service import NotifierService
+from notifier.commands import TelegramCommandHandler
 
 # Global browser manager instance for sharing across all endpoints
 browser_manager = None
 notifier_service = None
+command_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown events"""
-    global browser_manager, notifier_service
+    global browser_manager, notifier_service, command_task
 
     # Setup uvloop for maximum performance (2-4x improvement)
     uvloop_enabled = EventLoopOptimizer.setup_uvloop()
@@ -40,9 +43,22 @@ async def lifespan(app: FastAPI):
     notifier_service = NotifierService()
     notifier_service.start(browser_manager)
 
+    # Start Telegram command listener (/list, /add, /delete) if configured
+    if notifier_service.telegram and notifier_service.config.telegram_chat_id:
+        handler = TelegramCommandHandler(
+            notifier_service, notifier_service.telegram, notifier_service.config.telegram_chat_id
+        )
+        command_task = asyncio.create_task(handler.run(), name="telegram-commands")
+
     yield
 
-    # Shutdown: stop notifier loops, then clean up browser resources
+    # Shutdown: stop command listener + notifier loops, then clean up browser resources
+    if command_task:
+        command_task.cancel()
+        try:
+            await command_task
+        except asyncio.CancelledError:
+            pass
     if notifier_service:
         await notifier_service.stop()
     if browser_manager:

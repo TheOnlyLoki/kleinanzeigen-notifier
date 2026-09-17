@@ -6,7 +6,7 @@
 watches:
   - name: "BMW E46"
     query: "BMW E46"
-    location: "82297"       # PLZ or place name
+    location: "12345"
     radius: 30               # km - allowed steps: 5,10,20,30,50,100,150,200
     min_price: 500
     max_price: 3500

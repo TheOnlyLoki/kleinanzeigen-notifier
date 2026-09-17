@@ -1,14 +1,15 @@
 """Owns the background per-watch polling loops, started/stopped from the
-FastAPI app lifespan."""
+FastAPI app lifespan. Watches can be added/removed at runtime (e.g. from
+Telegram commands in notifier/commands.py), not just at startup."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 
-from notifier.config import AppConfig, WatchConfig, load_config
+from notifier.config import AppConfig, WatchConfig, load_config, save_config
 from notifier.storage import SeenAdsStore
 from notifier.telegram import TelegramClient
 from notifier.watchers import format_event, run_watch_once
@@ -45,36 +46,63 @@ async def _watch_loop(
 
 class NotifierService:
     def __init__(self) -> None:
-        self._tasks: List[asyncio.Task] = []
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self.config: Optional[AppConfig] = None
+        self.telegram: Optional[TelegramClient] = None
+        self._browser_manager: Optional[OptimizedPlaywrightManager] = None
 
     def start(self, browser_manager: OptimizedPlaywrightManager) -> None:
-        config: Optional[AppConfig] = load_config()
+        self._browser_manager = browser_manager
+        self.config = load_config()
 
-        if config is None:
-            logger.info("No config.yaml found - notifier disabled, API-only mode.")
-            return
-
-        if not config.watches:
-            logger.info("config.yaml has no watches configured - notifier idle.")
-            return
-
-        telegram = TelegramClient(config.telegram_bot_token) if config.telegram_bot_token else None
-        if telegram is None:
+        if self.config.telegram_bot_token:
+            self.telegram = TelegramClient(self.config.telegram_bot_token)
+        else:
             logger.warning("TELEGRAM_BOT_TOKEN not set - notifications will only be logged.")
 
-        for watch in config.watches:
-            store = SeenAdsStore(watch.name)
-            task = asyncio.create_task(
-                _watch_loop(browser_manager, watch, store, telegram, config.telegram_chat_id),
-                name=f"watch:{watch.name}",
-            )
-            self._tasks.append(task)
-            logger.info(f"Started watch '{watch.name}' every {watch.interval_minutes}min")
+        for watch in self.config.watches:
+            self._spawn(watch)
+
+    def _spawn(self, watch: WatchConfig) -> None:
+        store = SeenAdsStore(watch.name)
+        task = asyncio.create_task(
+            _watch_loop(
+                self._browser_manager, watch, store, self.telegram, self.config.telegram_chat_id
+            ),
+            name=f"watch:{watch.name}",
+        )
+        self._tasks[watch.name] = task
+        logger.info(f"Started watch '{watch.name}' every {watch.interval_minutes}min")
+
+    def list_watches(self) -> List[WatchConfig]:
+        return list(self.config.watches) if self.config else []
+
+    async def add_watch(self, watch: WatchConfig) -> None:
+        if watch.name in self._tasks:
+            raise ValueError(f"Watch '{watch.name}' already exists")
+        self.config.watches.append(watch)
+        save_config(self.config)
+        self._spawn(watch)
+
+    async def remove_watch(self, name: str) -> bool:
+        task = self._tasks.pop(name, None)
+        if task is None:
+            return False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        self.config.watches = [w for w in self.config.watches if w.name != name]
+        save_config(self.config)
+        return True
 
     async def stop(self) -> None:
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
-        for task in self._tasks:
+        for task in self._tasks.values():
             try:
                 await task
             except asyncio.CancelledError:
