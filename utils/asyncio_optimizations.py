@@ -8,6 +8,7 @@ to maximize performance and minimize memory usage.
 import asyncio
 import time
 import gc
+import os
 import weakref
 from typing import List, Callable, Any, Optional, Dict
 from contextlib import asynccontextmanager
@@ -178,8 +179,11 @@ class EventLoopOptimizer:
         # Set slow callback duration for debugging
         loop.slow_callback_duration = 0.1
 
-        # Enable debug mode in development
-        if __debug__:
+        # Opt-in only: __debug__ is True in every normal (non -O) run, so
+        # keying off it left asyncio debug mode on in production - which
+        # tracks coroutine origins and times every callback, a large constant
+        # overhead on slow hardware like a Raspberry Pi.
+        if os.environ.get("PYTHONASYNCIODEBUG"):
             loop.set_debug(True)
 
         return loop

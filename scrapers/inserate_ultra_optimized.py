@@ -8,7 +8,6 @@ the best possible performance for multi-page scraping operations.
 import asyncio
 import time
 import random
-import gc
 from datetime import datetime, date, timedelta
 from urllib.parse import urlencode
 from typing import List, Dict, Any, Optional, Tuple
@@ -27,7 +26,6 @@ from utils.error_handling import (
 )
 from utils.asyncio_optimizations import (
     HighPerformanceTaskManager,
-    MemoryOptimizedProcessor,
     EventLoopOptimizer,
     monitor_slow_coroutines,
 )
@@ -99,6 +97,118 @@ def _clean_location_text(text: str) -> str:
     return value.strip()
 
 
+# Runs in the page; returns plain data for every result card at once (see
+# UltraOptimizedScraper.extract_ads_optimized for why this is one call).
+_EXTRACT_ADS_JS = r"""
+() => {
+    const text = (el, selector) => {
+        const node = el.querySelector(selector);
+        return node ? node.innerText : "";
+    };
+
+    // NOTE: Astro relaunch dropped the .ad-listitem wrapper - match listing
+    // articles directly.
+    return Array.from(document.querySelectorAll("article[data-adid]")).map((el) => {
+        // Astro layout: h2 is gone - fall back to the card's embedded
+        // JSON-LD (fields title/name) when the classic selector misses.
+        let title = text(el, "h2.text-module-begin a.ellipsis").trim();
+        if (!title) {
+            const ld = el.querySelector('script[type="application/ld+json"]');
+            if (ld) {
+                try {
+                    const j = JSON.parse(ld.textContent);
+                    title = (j.title || j.name || "").trim();
+                } catch (e) {}
+            }
+        }
+
+        // No class name reliably marks the price element anymore (the site's
+        // markup moved to non-semantic utility classes), and the JSON-LD has
+        // no price field - so find it by content instead: the price is the
+        // only leaf node in the card whose text contains "€".
+        let price = "";
+        for (const node of el.querySelectorAll("p, span, div")) {
+            if (node.children.length === 0 && node.textContent && node.textContent.includes("€")) {
+                price = node.textContent.trim();
+                break;
+            }
+        }
+
+        let location = "";
+        const locationSelectors = [
+            ".aditem-main--top--left",
+            ".aditem-main--top--left--location",
+            "[class*='aditem-main--top--left']",
+            "[class*='location']",
+            "[class*='Location']",
+        ];
+        for (const selector of locationSelectors) {
+            const node = el.querySelector(selector);
+            if (node && node.innerText && node.innerText.trim()) {
+                location = node.innerText.trim();
+                break;
+            }
+        }
+        if (!location) {
+            const lines = (el.innerText || "")
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean);
+            location = lines.find((line) => /\b\d{5}\b/.test(line)) || "";
+        }
+
+        return {
+            adid: el.getAttribute("data-adid"),
+            href: el.getAttribute("data-href"),
+            title,
+            price,
+            location,
+            description: text(el, "p.aditem-main--middle--description"),
+            date: text(el, ".aditem-main--top--right"),
+        };
+    });
+}
+"""
+
+# Fetched by Chromium but never read by the scraper. Blocking them inside the
+# browser (CDP Network.setBlockedURLs - no per-request round trip back to
+# Python, unlike page.route) saves bandwidth plus decode/layout CPU.
+_BLOCKED_URL_PATTERNS = [
+    "*.jpg",
+    "*.jpeg",
+    "*.png",
+    "*.gif",
+    "*.webp",
+    "*.avif",
+    "*.svg",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.otf",
+    "*.mp4",
+    "*.webm",
+    "*img.kleinanzeigen.de*",
+    "*googletagmanager.com*",
+    "*google-analytics.com*",
+    "*doubleclick.net*",
+    "*googlesyndication.com*",
+    "*adservice.google.*",
+    "*criteo.*",
+    "*amazon-adsystem.com*",
+]
+
+
+async def _block_unneeded_resources(page) -> None:
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        await cdp.send("Network.enable")
+        await cdp.send("Network.setBlockedURLs", {"urls": _BLOCKED_URL_PATTERNS})
+    except Exception:
+        # Best effort only - never fail a scrape over an optimization.
+        pass
+
+
 class UltraOptimizedScraper:
     """
     Ultra-optimized scraper implementing all advanced asyncio patterns.
@@ -116,10 +226,6 @@ class UltraOptimizedScraper:
         self.task_manager = HighPerformanceTaskManager(
             max_concurrent=browser_manager._semaphore._value
         )
-        self.memory_processor = MemoryOptimizedProcessor(
-            max_concurrent=browser_manager._semaphore._value,
-            gc_threshold=50,  # More frequent GC for memory efficiency
-        )
 
         # Setup uvloop if available
         EventLoopOptimizer.setup_uvloop()
@@ -127,194 +233,45 @@ class UltraOptimizedScraper:
     @monitor_slow_coroutines(threshold=0.5)
     async def extract_ads_optimized(self, page) -> List[Dict[str, Any]]:
         """
-        Optimized ad extraction with memory management.
+        Extract all ads on the page in a single browser round trip.
 
-        Uses efficient DOM querying and immediate result processing
-        to minimize memory usage.
+        Every Playwright call is an IPC hop (Python -> Node driver -> CDP ->
+        Chromium and back). Querying each field of each card separately cost
+        ~6-8 hops per ad, i.e. 150-200 per results page, which dominated
+        scrape time on slow hardware like a Raspberry Pi. One evaluate() that
+        returns plain data for every card does the same work in one hop.
         """
         try:
-            # Use more specific selector to reduce DOM traversal
-            # NOTE: Astro relaunch dropped the .ad-listitem wrapper — match
-            # listing articles directly (still skips top-ads via class check).
-            items = await page.query_selector_all("article[data-adid]")
-
-            results = []
-
-            # Process items in batches to control memory usage
-            batch_size = 10
-            for i in range(0, len(items), batch_size):
-                batch = items[i : i + batch_size]
-
-                # Process batch concurrently
-                batch_tasks = []
-                for item in batch:
-                    batch_tasks.append(self._extract_single_ad(item))
-
-                batch_results = await asyncio.gather(
-                    *batch_tasks, return_exceptions=True
-                )
-
-                # Filter successful results
-                for result in batch_results:
-                    if isinstance(result, dict):
-                        results.append(result)
-
-                # Periodic memory cleanup
-                if i % (batch_size * 5) == 0:
-                    gc.collect()
-
-            return results
-
+            raw_items = await page.evaluate(_EXTRACT_ADS_JS)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def _extract_single_ad(self, article) -> Dict[str, Any]:
-        """Extract data from a single ad article element."""
-        try:
-            data_adid = await article.get_attribute("data-adid")
-            data_href = await article.get_attribute("data-href")
+        results = []
+        for raw in raw_items:
+            if not raw.get("adid") or not raw.get("href"):
+                continue
 
-            if not data_adid or not data_href:
-                return None
-
-            title_task = self._get_text_content(
-                article, "h2.text-module-begin a.ellipsis"
+            price_text = (
+                raw.get("price", "")
+                .replace("€", "")
+                .replace("VB", "")
+                .replace(".", "")
+                .strip()
             )
-            # No class name reliably marks the price element anymore (the
-            # site's markup moved to non-semantic utility classes), and
-            # unlike title there's no JSON-LD fallback with a price field -
-            # so find it by content instead: the price is the only leaf node
-            # in the card whose text contains "€".
-            price_task = article.evaluate(
-                """
-                (el) => {
-                    const nodes = el.querySelectorAll('p, span, div');
-                    for (const node of nodes) {
-                        if (node.children.length === 0 && node.textContent && node.textContent.includes('€')) {
-                            return node.textContent.trim();
-                        }
-                    }
-                    return "";
+
+            results.append(
+                {
+                    "adid": raw["adid"],
+                    "url": f"https://www.kleinanzeigen.de{raw['href']}",
+                    "title": raw.get("title", ""),
+                    "price": price_text,
+                    "location": _clean_location_text(raw.get("location", "")),
+                    "description": raw.get("description", ""),
+                    "published_at": _parse_kleinanzeigen_date(raw.get("date", "")),
                 }
-                """
-            )
-            desc_task = self._get_text_content(
-                article, "p.aditem-main--middle--description"
-            )
-            date_task = self._get_text_content(article, ".aditem-main--top--right")
-
-            location_task = article.evaluate(
-                """
-                (el) => {
-                    const selectors = [
-                        ".aditem-main--top--left",
-                        ".aditem-main--top--left--location",
-                        "[class*='aditem-main--top--left']",
-                        "[class*='location']",
-                        "[class*='Location']"
-                    ];
-
-                    for (const selector of selectors) {
-                        const node = el.querySelector(selector);
-                        if (node && node.innerText && node.innerText.trim()) {
-                            return node.innerText.trim();
-                        }
-                    }
-
-                    const text = el.innerText || "";
-                    const lines = text
-                        .split("\\n")
-                        .map(line => line.trim())
-                        .filter(Boolean);
-
-                    const zipLine = lines.find(line => /\\b\\d{5}\\b/.test(line));
-                    if (zipLine) {
-                        return zipLine;
-                    }
-
-                    return "";
-                }
-                """
             )
 
-            (
-                title_text,
-                price_text,
-                description_text,
-                date_raw,
-                location_raw,
-            ) = await asyncio.gather(
-                title_task,
-                price_task,
-                desc_task,
-                date_task,
-                location_task,
-                return_exceptions=True,
-            )
-
-            # Astro layout: h2 is gone — fall back to the article's embedded
-            # JSON-LD (<script type="application/ld+json">, fields
-            # title/description/creditText) when the classic selector misses.
-            if not (isinstance(title_text, str) and title_text.strip()):
-                try:
-                    ld_raw = await article.evaluate(
-                        """(el) => {
-                            const s = el.querySelector(
-                                'script[type="application/ld+json"]'
-                            );
-                            if (!s) return null;
-                            try { const j = JSON.parse(s.textContent);
-                                  return j.title || j.name || null; }
-                            catch (e) { return null; }
-                        }"""
-                    )
-                    if isinstance(ld_raw, str) and ld_raw.strip():
-                        title_text = ld_raw.strip()
-                except Exception:
-                    pass
-
-            if isinstance(price_text, str):
-                price_text = (
-                    price_text.replace("€", "")
-                    .replace("VB", "")
-                    .replace(".", "")
-                    .strip()
-                )
-            else:
-                price_text = ""
-
-            published_at = _parse_kleinanzeigen_date(
-                date_raw if isinstance(date_raw, str) else ""
-            )
-
-            location_text = _clean_location_text(
-                location_raw if isinstance(location_raw, str) else ""
-            )
-
-            return {
-                "adid": data_adid,
-                "url": f"https://www.kleinanzeigen.de{data_href}",
-                "title": title_text if isinstance(title_text, str) else "",
-                "price": price_text,
-                "location": location_text,
-                "description": description_text
-                if isinstance(description_text, str)
-                else "",
-                "published_at": published_at,
-            }
-
-        except Exception:
-            return None
-
-    async def _get_text_content(self, parent_element, selector: str) -> str:
-        """Efficiently get text content from an element."""
-        try:
-            element = await parent_element.query_selector(selector)
-            if element:
-                return await element.inner_text()
-            return ""
-        except Exception:
-            return ""
+        return results
 
     @monitor_slow_coroutines(
         threshold=2.0,
@@ -356,13 +313,19 @@ class UltraOptimizedScraper:
                     context = await self.browser_manager.get_context()
                     page = await context.new_page()
 
+                    await _block_unneeded_resources(page)
+
                     # Optimized page loading with minimal wait
                     await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
-                    # Wait for essential content only
+                    # Result cards are server-rendered, so they're normally
+                    # already attached at domcontentloaded and this returns
+                    # immediately. (It used to wait for ".ad-listitem", which
+                    # the Astro relaunch removed - so every page sat out the
+                    # full timeout.)
                     try:
                         await page.wait_for_selector(
-                            ".ad-listitem", timeout=5000, state="visible"
+                            "article[data-adid]", timeout=3000, state="attached"
                         )
                     except Exception:
                         # Continue even if selector not found - might be empty page
@@ -553,9 +516,6 @@ class UltraOptimizedScraper:
                     all_metrics.append(page_metrics)
                     tracker.add_page_metric(page_metrics)
 
-                # Memory cleanup between batches
-                gc.collect()
-
             # Set performance metrics
             tracker.set_concurrent_level(batch_size)
             browser_metrics = self.browser_manager.get_performance_metrics()
@@ -638,8 +598,6 @@ class UltraOptimizedScraper:
     async def cleanup(self):
         """Clean up all resources."""
         await self.task_manager.cancel_all()
-        await self.memory_processor.cleanup()
-        gc.collect()
 
 
 # Factory function for easy integration

@@ -5,6 +5,7 @@ Telegram commands in notifier/commands.py), not just at startup."""
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -15,12 +16,20 @@ from notifier.telegram import TelegramClient
 from notifier.watchers import format_event, run_watch_once
 from utils.browser import OptimizedPlaywrightManager
 
+# How many watches may scrape at the same time. Each scrape is a full
+# Chromium page load; on a Raspberry Pi several in parallel (e.g. all watches
+# firing together at startup) saturate the CPU and starve everything else,
+# including the Telegram command loop. Scrapes aren't latency-critical, so
+# running them one after another is the better trade-off there.
+MAX_CONCURRENT_SCRAPES = max(1, int(os.environ.get("NOTIFIER_MAX_CONCURRENT_SCRAPES", "1")))
+
 
 async def _watch_loop(
     browser_manager: OptimizedPlaywrightManager,
     watch: WatchConfig,
     store: SeenAdsStore,
     lock: asyncio.Lock,
+    scrape_slots: asyncio.Semaphore,
     telegram: Optional[TelegramClient],
     default_chat_id: Optional[str],
 ) -> None:
@@ -28,7 +37,7 @@ async def _watch_loop(
 
     while True:
         try:
-            async with lock:
+            async with lock, scrape_slots:
                 events = await run_watch_once(browser_manager, watch, store)
             for event in events:
                 logger.info(f"[{watch.name}] {event.kind}: {event.listing.get('title')}")
@@ -54,6 +63,7 @@ class NotifierService:
         self.config: Optional[AppConfig] = None
         self.telegram: Optional[TelegramClient] = None
         self._browser_manager: Optional[OptimizedPlaywrightManager] = None
+        self._scrape_slots = asyncio.Semaphore(MAX_CONCURRENT_SCRAPES)
 
     def start(self, browser_manager: OptimizedPlaywrightManager) -> None:
         self._browser_manager = browser_manager
@@ -78,6 +88,7 @@ class NotifierService:
                 watch,
                 store,
                 lock,
+                self._scrape_slots,
                 self.telegram,
                 self.config.telegram_chat_id,
             ),
@@ -97,7 +108,7 @@ class NotifierService:
         if watch is None:
             raise ValueError(f"No such watch: {name}")
 
-        async with self._locks[name]:
+        async with self._locks[name], self._scrape_slots:
             return await run_watch_once(self._browser_manager, watch, self._stores[name])
 
     async def add_watch(self, watch: WatchConfig) -> None:
@@ -133,3 +144,5 @@ class NotifierService:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
+        if self.telegram:
+            await self.telegram.close()
