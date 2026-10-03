@@ -91,6 +91,7 @@ class TelegramCommandHandler:
         self._allowed_chat_id = str(allowed_chat_id)
         self._offset: Optional[int] = None
         self._wizard: Optional[_AddWizard] = None
+        self._poll_task: Optional[asyncio.Task] = None
 
     async def run(self) -> None:
         # Discard any backlog (e.g. the /start used to discover chat_id) so it's not replayed.
@@ -98,17 +99,21 @@ class TelegramCommandHandler:
         if backlog:
             self._offset = backlog[-1]["update_id"] + 1
 
-        while True:
-            try:
-                updates = await self._telegram.get_updates(offset=self._offset, timeout=30)
-                for update in updates:
-                    self._offset = update["update_id"] + 1
-                    await self._handle_update(update)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Telegram command poll failed")
-                await asyncio.sleep(5)
+        try:
+            while True:
+                try:
+                    updates = await self._telegram.get_updates(offset=self._offset, timeout=30)
+                    for update in updates:
+                        self._offset = update["update_id"] + 1
+                        await self._handle_update(update)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Telegram command poll failed")
+                    await asyncio.sleep(5)
+        finally:
+            if self._poll_task and not self._poll_task.done():
+                self._poll_task.cancel()
 
     async def _handle_update(self, update: Dict[str, Any]) -> None:
         message = update.get("message") or {}
@@ -146,7 +151,7 @@ class TelegramCommandHandler:
             await self._cmd_delete(chat_id, arg)
         elif command == "/poll":
             arg = text.partition(" ")[2].strip()
-            await self._cmd_poll(chat_id, arg)
+            await self._start_poll(chat_id, arg)
         else:
             await self._telegram.send_message(chat_id, "Unknown command. /help for options.")
 
@@ -193,7 +198,26 @@ class TelegramCommandHandler:
             chat_id, f"\U0001F5D1 Removed '{target}'." if removed else f"Couldn't find '{target}'."
         )
 
+    async def _start_poll(self, chat_id: str, arg: str) -> None:
+        """Run /poll in the background: a scrape takes many seconds (far more
+        on a Raspberry Pi), and awaiting it here would stall getUpdates so no
+        other command got an answer until every watch was scraped."""
+        if self._poll_task and not self._poll_task.done():
+            await self._telegram.send_message(
+                chat_id, "A poll is already running - results will follow."
+            )
+            return
+        self._poll_task = asyncio.create_task(self._cmd_poll(chat_id, arg), name="telegram-poll")
+
     async def _cmd_poll(self, chat_id: str, arg: str) -> None:
+        try:
+            await self._poll(chat_id, arg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("/poll failed")
+
+    async def _poll(self, chat_id: str, arg: str) -> None:
         watches = self._service.list_watches()
         if not watches:
             await self._telegram.send_message(chat_id, "No watches configured. Use /add.")

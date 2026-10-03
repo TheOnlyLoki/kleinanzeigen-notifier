@@ -37,7 +37,9 @@ COPY . .
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')" || exit 1
+# busybox wget instead of `python -c ...`: starting a whole Python interpreter
+# every few seconds is a noticeable CPU tax on a Raspberry Pi.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -q -O /dev/null http://localhost:8000/ || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
