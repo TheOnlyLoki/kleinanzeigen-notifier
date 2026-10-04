@@ -13,6 +13,7 @@ from loguru import logger
 
 from notifier.config import WatchConfig
 from notifier.storage import SeenAdsStore
+from scrapers.inserate_by_url import scrape_by_url
 from scrapers.inserate_ultra_optimized import ultra_optimized_scrape_inserate
 from utils.browser import OptimizedPlaywrightManager
 
@@ -39,16 +40,23 @@ async def run_watch_once(
     watch: WatchConfig,
     store: SeenAdsStore,
 ) -> List[WatchEvent]:
-    response = await ultra_optimized_scrape_inserate(
-        browser_manager=browser_manager,
-        query=watch.query,
-        location=watch.location,
-        radius=watch.radius,
-        min_price=watch.min_price,
-        max_price=watch.max_price,
-        category_id=watch.category_id,
-        page_count=watch.page_count,
-    )
+    if watch.url:
+        response = await scrape_by_url(
+            browser_manager=browser_manager,
+            base_url=watch.url,
+            max_pages=watch.page_count,
+        )
+    else:
+        response = await ultra_optimized_scrape_inserate(
+            browser_manager=browser_manager,
+            query=watch.query,
+            location=watch.location,
+            radius=watch.radius,
+            min_price=watch.min_price,
+            max_price=watch.max_price,
+            category_id=watch.category_id,
+            page_count=watch.page_count,
+        )
 
     if not response.get("success", False):
         logger.warning(f"[{watch.name}] scrape failed: {response.get('error')}")

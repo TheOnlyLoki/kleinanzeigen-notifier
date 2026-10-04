@@ -9,12 +9,14 @@ publicly discoverable on Telegram.
 from __future__ import annotations
 
 import asyncio
+import html
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
 from notifier.config import WatchConfig
+from notifier.search_url import describe_search_url, extract_search_url, suggest_watch_name
 from notifier.service import NotifierService
 from notifier.telegram import TelegramClient
 from notifier.watchers import format_event
@@ -65,12 +67,38 @@ _ADD_STEPS = [
     ("interval_minutes", "Check interval in minutes? (send - for the default, 15)"),
 ]
 
+# /addurl: every filter comes from the URL, so only name + interval are asked.
+_ADD_URL_STEPS = [
+    (
+        "url",
+        "Set up the search on kleinanzeigen.de with all the filters you want "
+        "(e.g. brand, first registration, mileage, fuel, gearbox for cars), "
+        "then paste its URL here.",
+    ),
+    ("name", "Name for this watch?"),
+    ("interval_minutes", "Check interval in minutes? (send - for the default, 15)"),
+]
+
+_URL_HINT = (
+    "Tip: to use all of kleinanzeigen.de's filters for a category (e.g. brand, "
+    "mileage, gearbox for cars), set the search up on the site and just paste "
+    "its URL here instead - or use /addurl."
+)
+
 _INT_FIELDS = {"radius", "min_price", "max_price", "interval_minutes"}
+
+_INVALID_URL_TEXT = (
+    "That doesn't look like a kleinanzeigen.de search URL. Copy the address of "
+    "a search results page (starting with https://www.kleinanzeigen.de/s-...) - "
+    "not a single listing. /cancel to abort."
+)
 
 HELP_TEXT = (
     "<b>Kleinanzeigen Notifier</b>\n"
     "/list - show configured watches\n"
     "/add - add a new watch (guided)\n"
+    "/addurl [url] - add a watch from a kleinanzeigen.de search URL, with all its filters "
+    "(or just paste the URL)\n"
     "/delete &lt;number|name&gt; - remove a watch\n"
     "/poll [number|name] - scrape now instead of waiting for the interval\n"
     "/cancel - abort an in-progress /add\n"
@@ -80,6 +108,7 @@ HELP_TEXT = (
 
 @dataclass
 class _AddWizard:
+    steps: List[Tuple[str, str]] = field(default_factory=lambda: _ADD_STEPS)
     step: int = 0
     fields: Dict[str, Any] = field(default_factory=dict)
 
@@ -127,9 +156,16 @@ class TelegramCommandHandler:
             logger.warning(f"Ignoring command from unauthorized chat {chat_id}: {text!r}")
             return
 
-        if self._wizard is not None and not text.startswith("/"):
-            await self._advance_wizard(chat_id, text)
-            return
+        if not text.startswith("/"):
+            # A pasted search URL starts /addurl on its own - unless a wizard
+            # is past its first question and the text is an answer to it.
+            url = extract_search_url(text)
+            if url and (self._wizard is None or self._wizard.step == 0):
+                await self._start_url_wizard(chat_id, url)
+                return
+            if self._wizard is not None:
+                await self._advance_wizard(chat_id, text)
+                return
 
         command = text.split(" ", 1)[0].split("@", 1)[0].lower()
 
@@ -139,7 +175,17 @@ class TelegramCommandHandler:
             await self._cmd_list(chat_id)
         elif command == "/add":
             self._wizard = _AddWizard()
-            await self._telegram.send_message(chat_id, _ADD_STEPS[0][1])
+            await self._telegram.send_message(chat_id, f"{_URL_HINT}\n\n{_ADD_STEPS[0][1]}")
+        elif command == "/addurl":
+            arg = text.partition(" ")[2].strip()
+            url = extract_search_url(arg) if arg else None
+            if arg and not url:
+                await self._telegram.send_message(chat_id, _INVALID_URL_TEXT)
+            elif url:
+                await self._start_url_wizard(chat_id, url)
+            else:
+                self._wizard = _AddWizard(steps=_ADD_URL_STEPS)
+                await self._telegram.send_message(chat_id, _ADD_URL_STEPS[0][1])
         elif command == "/cancel":
             had_wizard = self._wizard is not None
             self._wizard = None
@@ -163,6 +209,15 @@ class TelegramCommandHandler:
 
         lines = []
         for i, w in enumerate(watches, start=1):
+            name = html.escape(w.name)
+            if w.url:
+                summary = " · ".join(describe_search_url(w.url, CATEGORY_LABELS)) or "Suche"
+                link = f'<a href="{html.escape(w.url, quote=True)}">\U0001F517</a>'
+                lines.append(
+                    f"{i}. <b>{name}</b> – {link} {html.escape(summary)} ⏱{w.interval_minutes}min"
+                )
+                continue
+
             parts = [w.query or "(any keyword)"]
             if w.category_id:
                 parts.append(f"\U0001F3F7{CATEGORY_LABELS.get(w.category_id, w.category_id)}")
@@ -171,7 +226,7 @@ class TelegramCommandHandler:
             if w.min_price or w.max_price:
                 parts.append(f"\U0001F4B6{w.min_price or 0}-{w.max_price or '∞'}€")
             parts.append(f"⏱{w.interval_minutes}min")
-            lines.append(f"{i}. <b>{w.name}</b> – {' '.join(parts)}")
+            lines.append(f"{i}. <b>{name}</b> – {' '.join(parts)}")
 
         await self._telegram.send_message(chat_id, "\n".join(lines))
 
@@ -255,8 +310,17 @@ class TelegramCommandHandler:
     async def _advance_wizard(self, chat_id: str, text: str) -> None:
         wizard = self._wizard
         assert wizard is not None
-        key, _ = _ADD_STEPS[wizard.step]
+        key, _ = wizard.steps[wizard.step]
         value: Any = None if text == "-" else text
+
+        if key == "url":
+            value = extract_search_url(text)
+            if not value:
+                await self._telegram.send_message(chat_id, _INVALID_URL_TEXT)
+                return
+
+        if key == "name" and value is None and "url" in wizard.fields:
+            value = self._suggested_name(wizard.fields["url"])
 
         if key == "category_id" and value is not None:
             if value.isdigit():
@@ -293,10 +357,11 @@ class TelegramCommandHandler:
         wizard.fields[key] = value
         wizard.step += 1
 
-        if wizard.step >= len(_ADD_STEPS):
+        if wizard.step >= len(wizard.steps):
             self._wizard = None
             watch = WatchConfig(
                 name=wizard.fields["name"],
+                url=wizard.fields.get("url"),
                 query=wizard.fields.get("query"),
                 category_id=wizard.fields.get("category_id"),
                 location=wizard.fields.get("location"),
@@ -306,6 +371,35 @@ class TelegramCommandHandler:
                 interval_minutes=wizard.fields.get("interval_minutes") or 15,
             )
             await self._service.add_watch(watch)
-            await self._telegram.send_message(chat_id, f"✅ Added watch '{watch.name}'.")
+            confirmation = f"✅ Added watch '{html.escape(watch.name)}'."
+            if watch.url:
+                filters = describe_search_url(watch.url, CATEGORY_LABELS)
+                if filters:
+                    confirmation += "\n" + html.escape(" · ".join(filters))
+            await self._telegram.send_message(chat_id, confirmation)
         else:
-            await self._telegram.send_message(chat_id, _ADD_STEPS[wizard.step][1])
+            await self._telegram.send_message(chat_id, self._prompt(wizard))
+
+    async def _start_url_wizard(self, chat_id: str, url: str) -> None:
+        self._wizard = _AddWizard(steps=_ADD_URL_STEPS, step=1, fields={"url": url})
+        filters = describe_search_url(url, CATEGORY_LABELS)
+        intro = "\U0001F517 Search URL received"
+        if filters:
+            intro += ": " + html.escape(" · ".join(filters))
+        await self._telegram.send_message(chat_id, f"{intro}\n\n{self._prompt(self._wizard)}")
+
+    def _prompt(self, wizard: _AddWizard) -> str:
+        key, prompt = wizard.steps[wizard.step]
+        if key == "name" and "url" in wizard.fields:
+            suggestion = self._suggested_name(wizard.fields["url"])
+            return f"{prompt} (send - for '{html.escape(suggestion)}')"
+        return prompt
+
+    def _suggested_name(self, url: str) -> str:
+        """Name derived from the URL, made unique among existing watches."""
+        base = suggest_watch_name(url, CATEGORY_LABELS)
+        taken = {w.name.lower() for w in self._service.list_watches()}
+        name, n = base, 2
+        while name.lower() in taken:
+            name, n = f"{base} {n}", n + 1
+        return name
