@@ -65,15 +65,23 @@ def parse_kleinanzeigen_url(url: str) -> dict:
         fs = filter_segment[2:] if filter_segment.startswith("k0") else filter_segment
 
         for attr in fs.split("+"):
-            # Category ID — c220
-            if re.match(r"^c\d+$", attr):
-                result["category_id"] = int(attr[1:])
+            # Category ID — c220, or c216l3331r20 when a location (l<id>) and
+            # radius (r<km>) were picked on the site
+            category = re.match(r"^c(\d+)(?:l\d+)?(?:r(\d+))?$", attr)
+            if category:
+                result["category_id"] = int(category.group(1))
+                if category.group(2):
+                    result["radius"] = int(category.group(2))
                 continue
 
             if ":" not in attr:
                 continue
 
             key, value = attr.split(":", 1)
+
+            # Every attribute verbatim, known or not - lets callers show or
+            # replay filters this parser has no dedicated handling for
+            result.setdefault("attributes", {})[key] = value
 
             # Year — *.ez_i:2008,  (trailing comma = open-ended)
             if key.endswith(".ez_i"):
@@ -135,6 +143,10 @@ def map_to_inserate_params(parsed: dict) -> tuple[dict, dict]:
 
     inserate_params["page_count"] = parsed.get("page", 1)
 
-    unmapped = {k: v for k, v in parsed.items() if k not in _MAPPED_SOURCE_KEYS}
+    # "attributes" only repeats the filter-segment values already broken out
+    # into year_from/brands/unknown_attrs etc., so leave it out here.
+    unmapped = {
+        k: v for k, v in parsed.items() if k not in _MAPPED_SOURCE_KEYS and k != "attributes"
+    }
 
     return inserate_params, unmapped

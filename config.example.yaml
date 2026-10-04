@@ -18,4 +18,13 @@ watches:
       - price_drop
     # chat_id: "123456789"   # optional: override TELEGRAM_CHAT_ID for just this watch
 
+  # Any search set up on kleinanzeigen.de itself, with all of the site's
+  # filters for that category (here: VW, first registration from 2008,
+  # automatic, estate/SUV). Copy the URL of the results page; when "url" is
+  # set, query/category/location/radius/price above are not used.
+  # Easiest from Telegram: just paste the URL into the chat with the bot.
+  - name: "VW Kombi Automatik"
+    url: "https://www.kleinanzeigen.de/s-autos/volkswagen/k0c216+autos.ez_i:2008%2C+autos.marke_s:volkswagen+autos.shift_s:automatik+autos.typ_s:(kombi%2Csuv)"
+    interval_minutes: 15
+
   # Add more watches here, each with its own query/interval/chat_id.

@@ -601,6 +601,24 @@ watches:
     # chat_id: "123456789"  # optional per-watch override
 ```
 
+#### Watches from a kleinanzeigen.de search URL (all filters)
+
+The fields above cover what every category shares. For category-specific
+filters - for cars e.g. brand, model, first registration, mileage, fuel,
+gearbox, body type - set the search up on kleinanzeigen.de itself and use the
+URL of the results page instead:
+
+```yaml
+  - name: "VW Kombi Automatik"
+    url: "https://www.kleinanzeigen.de/s-autos/volkswagen/k0c216+autos.ez_i:2008%2C+autos.marke_s:volkswagen+autos.shift_s:automatik+autos.typ_s:(kombi%2Csuv)"
+    interval_minutes: 15
+```
+
+The URL is scraped as-is, so every filter of every category works without
+the notifier having to know about it. `query`, `category_id`, `location`,
+`radius` and the price fields are ignored when `url` is set. From Telegram,
+simply paste such a URL into the chat (or use `/addurl`).
+
 Seen-ad state is kept per watch as a small JSON file under `data/` (mounted
 as a volume in `docker-compose.yml`), so it survives restarts/redeploys.
 
@@ -621,6 +639,12 @@ manual `config.yaml` editing needed:
   location, radius, price range, and check interval, then starts watching
   immediately. Category accepts a friendly name (auto, motorrad, fahrrad, ...)
   or a raw kleinanzeigen.de category id
+- **`/addurl [url]`** - add a watch from a kleinanzeigen.de search URL with
+  all the site's filters for that category (see above); only asks for a name
+  (with a suggestion) and the check interval. Pasting a search URL into the
+  chat does the same without any command. `/list` then shows the decoded
+  filters (e.g. `Marke: volkswagen · EZ: ab 2008 · Getriebe: automatik`) and a
+  link to open the search
 - **`/delete <number|name>`** - remove a watch (number from `/list`, or its
   exact name)
 - **`/poll [number|name]`** - scrape right now instead of waiting for the

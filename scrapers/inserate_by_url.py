@@ -4,7 +4,6 @@ Reuses UltraOptimizedScraper for fetching/extraction; only the URL-building diff
 """
 
 import asyncio
-import gc
 import logging
 import math
 import re
@@ -32,10 +31,18 @@ def inject_page(url: str, page_num: int) -> str:
       /s-autos/anzeige:angebote/preis::15000/seite:2/c216+...
     Generic search URLs (no filter segment): s-seite:N appended before the query string.
     """
-    from urllib.parse import urlparse, urlunparse, unquote
+    from urllib.parse import urlparse, urlunparse, unquote, parse_qsl, urlencode
 
     parsed = urlparse(url)
     path = unquote(parsed.path)
+
+    # Search-form URLs (/s-suchanfrage.html?keywords=...) paginate via a
+    # pageNum query parameter, not a path segment.
+    if path.endswith(".html"):
+        query = [(k, v) for k, v in parse_qsl(parsed.query) if k != "pageNum"]
+        if page_num > 1:
+            query.append(("pageNum", str(page_num)))
+        return urlunparse(parsed._replace(query=urlencode(query)))
 
     # Strip any existing page segment
     segments = [
@@ -166,7 +173,6 @@ async def scrape_by_url(
 
                 if stop:
                     break
-            gc.collect()
 
         pages_attempted = len(all_metrics)
         tracker.set_concurrent_level(batch_size)
