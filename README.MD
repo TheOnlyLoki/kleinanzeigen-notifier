@@ -715,6 +715,13 @@ CI (`.github/workflows/ci.yml`) builds and pushes a multi-arch
 (`linux/amd64` + `linux/arm64`) image to GHCR on every push to `main`, so the
 Pi pulls a native arm64 image rather than emulating amd64.
 
+Pull requests from branches of this repo get an image too, tagged
+`pr-<number>`, to try a change on the Pi before merging: set
+`image: ghcr.io/theonlyloki/kleinanzeigen-notifier:pr-<number>` for `app` in
+`docker-compose.yml`, run `docker compose pull app && docker compose up -d app`,
+and switch back to `:main` once it's merged (Watchtower keeps following
+whichever tag is configured, including new pushes to the PR).
+
 **One-time GHCR step:** packages pushed via `GITHUB_TOKEN` default to
 *private*. Either make the package public (repo → Packages → package
 settings → Change visibility), or `docker login ghcr.io` on the Pi with a
