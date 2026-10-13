@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from notifier.config import AppConfig, WatchConfig, load_config, save_config
+from notifier.facets import FacetPage, load_facet_page
 from notifier.storage import SeenAdsStore
 from notifier.telegram import TelegramClient
 from notifier.watchers import format_event, run_watch_once
@@ -118,16 +119,37 @@ class NotifierService:
         save_config(self.config)
         self._spawn(watch)
 
-    async def remove_watch(self, name: str) -> bool:
+    async def _stop_task(self, name: str) -> bool:
         task = self._tasks.pop(name, None)
         if task is None:
             return False
-
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        return True
+
+    async def update_watch_url(self, name: str, url: str) -> bool:
+        """Point a watch at a new search URL (/edit), keeping its name, interval
+        and seen-ads state. A keyword watch becomes a URL watch this way."""
+        watch = next((w for w in self.config.watches if w.name == name), None)
+        if watch is None or not await self._stop_task(name):
+            return False
+        watch.url = url
+        save_config(self.config)
+        self._spawn(watch)
+        return True
+
+    async def load_facets(self, url: str) -> FacetPage:
+        """Filter options of a search page, for /filter (notifier/facets.py).
+        Not counted against MAX_CONCURRENT_SCRAPES: a person is waiting on it,
+        and it's one page load per tap."""
+        return await load_facet_page(self._browser_manager, url)
+
+    async def remove_watch(self, name: str) -> bool:
+        if not await self._stop_task(name):
+            return False
 
         self.config.watches = [w for w in self.config.watches if w.name != name]
         save_config(self.config)
