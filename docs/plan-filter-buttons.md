@@ -1,5 +1,35 @@
 # Plan: Kategorie-Filter per Telegram-Buttons ("Weg 2")
 
+## Stand der Umsetzung
+
+Phasen 1–5 sind umgesetzt (`/filter`, `/edit`):
+
+| Teil | Datei |
+|---|---|
+| Facetten-Extraktor, URL-Bearbeitung, Cache | `notifier/facets.py` |
+| Filter-Sitzung (Ansichten, Buttons, Texteingaben) | `notifier/filter_session.py` |
+| Inline-Keyboards, Editieren, Callbacks | `notifier/telegram.py` |
+| `/filter`, `/edit`, Callback-Routing | `notifier/commands.py` |
+| `update_watch_url`, `load_facets` | `notifier/service.py` |
+| Prüfwerkzeug für echte Seiten | `tools/dump_facets.py` |
+
+Entscheidungen zu den offenen Fragen (alle leicht änderbar): eigener Befehl
+`/filter` (auf den `/add` hinweist), Schnellauswahl = `CATEGORY_LABELS`, Menütexte
+englisch wie die übrigen Befehle (Filternamen kommen deutsch von der Seite).
+
+Abweichungen vom Plan:
+- Facetten-Ladevorgänge laufen am Scrape-Semaphor vorbei statt über eine
+  Prioritäts-Warteschlange: ein Mensch klickt, das sind wenige Seitenaufrufe,
+  und so muss er nie auf einen geplanten Scrape warten.
+- Gewählte Werte bleiben immer als Option sichtbar (mit ✅), auch wenn die Seite
+  sie nicht mehr verlinkt - sonst ließen sie sich in der Liste nicht abwählen.
+
+**Noch offen - Phase 0 mit der echten Seite:** Getestet ist alles gegen
+nachgebaute Seiten (inkl. des Sammelskripts in echtem Chromium), nicht gegen
+kleinanzeigen.de selbst. Auf dem Pi zeigt
+`docker compose exec app python -m tools.dump_facets "<url>" --html /app/data/x.html`,
+welche Filter erkannt werden; das HTML taugt als Fixture für `tests/test_facets.py`.
+
 Ziel: Suchen mit allen Filtern einer Kategorie (bei Autos z.B. Marke, Modell,
 Erstzulassung, Kilometerstand, Kraftstoff, Getriebe, Fahrzeugtyp) direkt in
 Telegram per Buttons zusammenklicken, ohne die Seite im Browser zu öffnen und

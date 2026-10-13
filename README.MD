@@ -661,14 +661,36 @@ manual `config.yaml` editing needed:
   chat does the same without any command. `/list` then shows the decoded
   filters (e.g. `Marke: volkswagen · EZ: ab 2008 · Getriebe: automatik`) and a
   link to open the search
+- **`/filter`** - build a search by tapping buttons instead of typing a URL:
+  category, keywords, location and radius first, then every filter the
+  results page offers for that category (for cars e.g. Marke, then Modell,
+  Kraftstoff, Getriebe, Erstzulassung, ...), with result counts. Several
+  values can be ticked per filter, ranges (year, mileage, price) are typed in
+  (`2008-`, `-150000`, `2008-2015`), ✖ removes a filter, Undo steps back.
+  Done leads into the same name/interval questions as `/addurl`. All of it
+  happens in one message that's updated in place
+- **`/edit <number|name>`** - the same buttons for an existing watch; a
+  keyword watch becomes a URL watch this way. Name, interval and seen-ads
+  state are kept
 - **`/delete <number|name>`** - remove a watch (number from `/list`, or its
   name; part of the name works too as long as it matches only one watch)
 - **`/poll [number|name]`** (alias **`/pull`**) - scrape right now instead of
   waiting for the interval. Part of a name is enough: `/pull subaru` polls
   every watch whose name (or, failing that, its search) contains "subaru".
   Polls every watch if no argument is given
-- **`/cancel`** - abort an in-progress `/add`
+- **`/cancel`** - abort an in-progress `/add` or `/filter`
 - **`/help`** - list commands
+
+`/filter` reads the filters from the site itself rather than knowing them
+in advance: a sidebar link that adds exactly one filter to the current search
+is an option (`notifier/facets.py`), so it works for every category and keeps
+working when the site adds filters. Each applied filter is one page load
+(about 1-3 s on a Pi); going back is cached. To check what it finds on a real
+page, or to save the page for a test fixture:
+
+```sh
+docker compose exec app python -m tools.dump_facets "https://www.kleinanzeigen.de/s-autos/c216" --html /app/data/autos.html
+```
 
 Changes are written straight back to `config.yaml` (hence that volume is
 mounted read-write) and take effect immediately - no restart required.

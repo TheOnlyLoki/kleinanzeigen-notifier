@@ -1,4 +1,5 @@
-"""Manage watches from Telegram chat: /list, /add (guided), /addurl, /delete, /poll.
+"""Manage watches from Telegram chat: /list, /add (guided), /addurl, /filter,
+/edit, /delete, /poll.
 
 Long-polls getUpdates (no inbound port/webhook needed - fits the Pi
 deployment the same way the search watchers and Watchtower do). Only the
@@ -11,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import html
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
 from notifier.config import WatchConfig
+from notifier.facets import start_url, with_price
+from notifier.filter_session import FilterSession
 from notifier.search_url import describe_search_url, extract_search_url, suggest_watch_name
 from notifier.service import NotifierService
 from notifier.telegram import TelegramClient
@@ -81,8 +84,8 @@ _ADD_URL_STEPS = [
 
 _URL_HINT = (
     "Tip: to use all of kleinanzeigen.de's filters for a category (e.g. brand, "
-    "mileage, gearbox for cars), set the search up on the site and just paste "
-    "its URL here instead - or use /addurl."
+    "mileage, gearbox for cars), tap through them with /filter - or set the "
+    "search up on the site and just paste its URL here."
 )
 
 _INT_FIELDS = {"radius", "min_price", "max_price", "interval_minutes"}
@@ -99,10 +102,12 @@ HELP_TEXT = (
     "/add - add a new watch (guided)\n"
     "/addurl [url] - add a watch from a kleinanzeigen.de search URL, with all its filters "
     "(or just paste the URL)\n"
+    "/filter - add a watch by tapping through a category's filters (brand, mileage, ...)\n"
+    "/edit &lt;number|name&gt; - change a watch's filters with the same buttons\n"
     "/delete &lt;number|name&gt; - remove a watch\n"
     "/poll [number|name] - scrape now instead of waiting for the interval; "
     "part of a name is enough, e.g. /poll subaru (alias: /pull)\n"
-    "/cancel - abort an in-progress /add\n"
+    "/cancel - abort an in-progress /add or /filter\n"
     "/help - this message"
 )
 
@@ -122,6 +127,8 @@ class TelegramCommandHandler:
         self._offset: Optional[int] = None
         self._wizard: Optional[_AddWizard] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._filter: Optional[FilterSession] = None
+        self._background: Set[asyncio.Task] = set()
 
     async def run(self) -> None:
         # Discard any backlog (e.g. the /start used to discover chat_id) so it's not replayed.
@@ -144,8 +151,34 @@ class TelegramCommandHandler:
         finally:
             if self._poll_task and not self._poll_task.done():
                 self._poll_task.cancel()
+            for task in self._background:
+                task.cancel()
+
+    def _spawn_background(self, coro: Coroutine) -> None:
+        """Filter-session work loads pages (seconds on a Pi) - never await it
+        in the getUpdates loop, or every other command would stall meanwhile."""
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _active_filter(self) -> Optional[FilterSession]:
+        session = self._filter
+        if session and (session.done or session.expired):
+            self._filter = session = None
+        return session
+
+    async def _close_filter(self) -> bool:
+        session = self._active_filter()
+        self._filter = None
+        if session:
+            await session.cancel()
+        return session is not None
 
     async def _handle_update(self, update: Dict[str, Any]) -> None:
+        if "callback_query" in update:
+            await self._handle_callback(update["callback_query"])
+            return
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id", ""))
@@ -158,6 +191,14 @@ class TelegramCommandHandler:
             return
 
         if not text.startswith("/"):
+            session = self._active_filter()
+            if session and session.awaiting_text:
+                if session.busy:
+                    await self._telegram.send_message(chat_id, "⏳ Still loading - one moment.")
+                else:
+                    self._spawn_background(session.handle_text(text))
+                return
+
             # A pasted search URL starts /addurl on its own - unless a wizard
             # is past its first question and the text is an answer to it.
             url = extract_search_url(text)
@@ -175,9 +216,11 @@ class TelegramCommandHandler:
         elif command == "/list":
             await self._cmd_list(chat_id)
         elif command == "/add":
+            await self._close_filter()
             self._wizard = _AddWizard()
             await self._telegram.send_message(chat_id, f"{_URL_HINT}\n\n{_ADD_STEPS[0][1]}")
         elif command == "/addurl":
+            await self._close_filter()
             arg = text.partition(" ")[2].strip()
             url = extract_search_url(arg) if arg else None
             if arg and not url:
@@ -190,9 +233,14 @@ class TelegramCommandHandler:
         elif command == "/cancel":
             had_wizard = self._wizard is not None
             self._wizard = None
+            had_filter = await self._close_filter()
             await self._telegram.send_message(
-                chat_id, "Cancelled." if had_wizard else "Nothing to cancel."
+                chat_id, "Cancelled." if had_wizard or had_filter else "Nothing to cancel."
             )
+        elif command == "/filter":
+            await self._start_filter(chat_id)
+        elif command == "/edit":
+            await self._cmd_edit(chat_id, text.partition(" ")[2].strip())
         elif command == "/delete":
             arg = text.partition(" ")[2].strip()
             await self._cmd_delete(chat_id, arg)
@@ -410,6 +458,82 @@ class TelegramCommandHandler:
             await self._telegram.send_message(chat_id, confirmation)
         else:
             await self._telegram.send_message(chat_id, self._prompt(wizard))
+
+    async def _handle_callback(self, callback: Dict[str, Any]) -> None:
+        chat_id = str(((callback.get("message") or {}).get("chat") or {}).get("id", ""))
+        if chat_id != self._allowed_chat_id:
+            logger.warning(f"Ignoring button press from unauthorized chat {chat_id}")
+            return
+
+        token, _, action = (callback.get("data") or "").partition("|")
+        session = self._active_filter()
+        if session is None or session.token != token:
+            await self._telegram.answer_callback(
+                callback["id"], "This menu has expired - /filter to start again."
+            )
+            return
+        if session.busy:
+            await self._telegram.answer_callback(callback["id"], "⏳ Still loading…")
+            return
+        await self._telegram.answer_callback(callback["id"])
+        self._spawn_background(session.handle_callback(action))
+
+    def _new_filter(self, chat_id: str, on_done, title: str, initial_url: Optional[str] = None):
+        self._wizard = None
+        self._filter = FilterSession(
+            chat_id,
+            self._telegram,
+            load=self._service.load_facets,
+            on_done=on_done,
+            category_labels=CATEGORY_LABELS,
+            category_aliases=CATEGORIES,
+            title=title,
+            initial_url=initial_url,
+        )
+        self._spawn_background(self._filter.start())
+
+    async def _start_filter(self, chat_id: str) -> None:
+        await self._close_filter()
+
+        async def done(url: str) -> None:
+            self._filter = None
+            await self._start_url_wizard(chat_id, url)
+
+        self._new_filter(chat_id, done, "New search")
+
+    async def _cmd_edit(self, chat_id: str, arg: str) -> None:
+        matches = self._match_watches(arg) if arg else []
+        if len(matches) != 1:
+            hint = (
+                f"'{html.escape(arg)}' matches several watches - use the number from /list."
+                if matches
+                else "Usage: /edit &lt;number from /list, or name&gt;"
+            )
+            await self._telegram.send_message(chat_id, hint)
+            return
+
+        name = matches[0]
+        watch = next(w for w in self._service.list_watches() if w.name == name)
+        # Keyword watches start from the equivalent search and become URL watches
+        url = watch.url or with_price(
+            start_url(watch.category_id, watch.query, watch.location, watch.radius),
+            watch.min_price,
+            watch.max_price,
+        )
+        await self._close_filter()
+
+        async def done(new_url: str) -> None:
+            self._filter = None
+            updated = await self._service.update_watch_url(name, new_url)
+            if not updated:
+                await self._telegram.send_message(chat_id, f"Couldn't find '{html.escape(name)}'.")
+                return
+            summary = " · ".join(describe_search_url(new_url, CATEGORY_LABELS))
+            await self._telegram.send_message(
+                chat_id, f"✅ Updated '{html.escape(name)}'.\n{html.escape(summary)}"
+            )
+
+        self._new_filter(chat_id, done, f"Edit: {name}", initial_url=url)
 
     async def _start_url_wizard(self, chat_id: str, url: str) -> None:
         self._wizard = _AddWizard(steps=_ADD_URL_STEPS, step=1, fields={"url": url})
