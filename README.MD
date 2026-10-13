@@ -662,9 +662,11 @@ manual `config.yaml` editing needed:
   filters (e.g. `Marke: volkswagen · EZ: ab 2008 · Getriebe: automatik`) and a
   link to open the search
 - **`/delete <number|name>`** - remove a watch (number from `/list`, or its
-  exact name)
-- **`/poll [number|name]`** - scrape right now instead of waiting for the
-  interval; polls every watch if no argument is given
+  name; part of the name works too as long as it matches only one watch)
+- **`/poll [number|name]`** (alias **`/pull`**) - scrape right now instead of
+  waiting for the interval. Part of a name is enough: `/pull subaru` polls
+  every watch whose name (or, failing that, its search) contains "subaru".
+  Polls every watch if no argument is given
 - **`/cancel`** - abort an in-progress `/add`
 - **`/help`** - list commands
 

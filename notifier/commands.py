@@ -1,4 +1,4 @@
-"""Manage watches from Telegram chat: /list, /add (guided), /delete.
+"""Manage watches from Telegram chat: /list, /add (guided), /addurl, /delete, /poll.
 
 Long-polls getUpdates (no inbound port/webhook needed - fits the Pi
 deployment the same way the search watchers and Watchtower do). Only the
@@ -100,7 +100,8 @@ HELP_TEXT = (
     "/addurl [url] - add a watch from a kleinanzeigen.de search URL, with all its filters "
     "(or just paste the URL)\n"
     "/delete &lt;number|name&gt; - remove a watch\n"
-    "/poll [number|name] - scrape now instead of waiting for the interval\n"
+    "/poll [number|name] - scrape now instead of waiting for the interval; "
+    "part of a name is enough, e.g. /poll subaru (alias: /pull)\n"
     "/cancel - abort an in-progress /add\n"
     "/help - this message"
 )
@@ -195,7 +196,7 @@ class TelegramCommandHandler:
         elif command == "/delete":
             arg = text.partition(" ")[2].strip()
             await self._cmd_delete(chat_id, arg)
-        elif command == "/poll":
+        elif command in ("/poll", "/pull"):
             arg = text.partition(" ")[2].strip()
             await self._start_poll(chat_id, arg)
         else:
@@ -230,27 +231,50 @@ class TelegramCommandHandler:
 
         await self._telegram.send_message(chat_id, "\n".join(lines))
 
-    def _resolve_watch_name(self, arg: str) -> Optional[str]:
+    def _match_watches(self, arg: str) -> List[str]:
+        """Watch names matching arg, most specific rule first: number from
+        /list, exact name, part of a name ("subaru" -> "Subaru Impreza"),
+        then part of the search itself (keywords, or a URL watch's filters)."""
         watches = self._service.list_watches()
         if arg.isdigit():
             idx = int(arg) - 1
-            return watches[idx].name if 0 <= idx < len(watches) else None
-        for w in watches:
-            if w.name.lower() == arg.lower():
-                return w.name
-        return None
+            return [watches[idx].name] if 0 <= idx < len(watches) else []
+
+        needle = arg.lower()
+        exact = [w.name for w in watches if w.name.lower() == needle]
+        if exact:
+            return exact
+        by_name = [w.name for w in watches if needle in w.name.lower()]
+        if by_name:
+            return by_name
+        return [w.name for w in watches if needle in self._search_text(w)]
+
+    @staticmethod
+    def _search_text(watch: WatchConfig) -> str:
+        if watch.url:
+            return " ".join(describe_search_url(watch.url, CATEGORY_LABELS)).lower()
+        return (watch.query or "").lower()
 
     async def _cmd_delete(self, chat_id: str, arg: str) -> None:
-        target = self._resolve_watch_name(arg) if arg else None
-        if not target:
+        matches = self._match_watches(arg) if arg else []
+        if len(matches) > 1:
+            # Never delete more than one watch from a vague argument.
+            names = ", ".join(f"'{html.escape(m)}'" for m in matches)
             await self._telegram.send_message(
-                chat_id, "Usage: /delete <number from /list, or exact name>"
+                chat_id, f"'{html.escape(arg)}' matches {names} - use the number from /list."
             )
             return
+        if not matches:
+            await self._telegram.send_message(
+                chat_id, "Usage: /delete &lt;number from /list, or name&gt;"
+            )
+            return
+        target = matches[0]
 
         removed = await self._service.remove_watch(target)
+        name = html.escape(target)
         await self._telegram.send_message(
-            chat_id, f"\U0001F5D1 Removed '{target}'." if removed else f"Couldn't find '{target}'."
+            chat_id, f"\U0001F5D1 Removed '{name}'." if removed else f"Couldn't find '{name}'."
         )
 
     async def _start_poll(self, chat_id: str, arg: str) -> None:
@@ -279,33 +303,40 @@ class TelegramCommandHandler:
             return
 
         if arg:
-            target = self._resolve_watch_name(arg)
-            if not target:
+            targets = self._match_watches(arg)
+            if not targets:
                 await self._telegram.send_message(
-                    chat_id, "Usage: /poll [number from /list, or exact name]"
+                    chat_id,
+                    f"No watch matches '{html.escape(arg)}'. "
+                    "Usage: /poll [number from /list, or (part of a) name]",
                 )
                 return
-            targets = [target]
         else:
             targets = [w.name for w in watches]
 
-        await self._telegram.send_message(
-            chat_id, f"\U0001F504 Polling {len(targets)} watch(es) now..."
-        )
+        if len(targets) <= 3:
+            label = ", ".join(f"'{html.escape(t)}'" for t in targets)
+        else:
+            label = f"{len(targets)} watches"
+        await self._telegram.send_message(chat_id, f"\U0001F504 Polling {label} now...")
 
         for name in targets:
             try:
                 events = await self._service.poll_watch(name)
             except Exception:
                 logger.exception(f"[{name}] manual poll failed")
-                await self._telegram.send_message(chat_id, f"⚠️ Poll failed for '{name}'.")
+                await self._telegram.send_message(
+                    chat_id, f"⚠️ Poll failed for '{html.escape(name)}'."
+                )
                 continue
 
             if events:
                 for event in events:
                     await self._telegram.send_message(chat_id, format_event(event))
             else:
-                await self._telegram.send_message(chat_id, f"'{name}': no new results.")
+                await self._telegram.send_message(
+                    chat_id, f"'{html.escape(name)}': no new results."
+                )
 
     async def _advance_wizard(self, chat_id: str, text: str) -> None:
         wizard = self._wizard
