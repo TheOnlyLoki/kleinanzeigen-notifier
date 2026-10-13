@@ -601,6 +601,40 @@ watches:
     # chat_id: "123456789"  # optional per-watch override
 ```
 
+#### Watches from a kleinanzeigen.de search URL (all filters)
+
+The fields above cover what every category shares. For category-specific
+filters - for cars e.g. brand, model, first registration, mileage, fuel,
+gearbox, body type - set the search up on kleinanzeigen.de itself and use the
+URL of the results page instead:
+
+```yaml
+  - name: "VW Kombi Automatik"
+    url: "https://www.kleinanzeigen.de/s-autos/volkswagen/k0c216+autos.ez_i:2008%2C+autos.marke_s:volkswagen+autos.shift_s:automatik+autos.typ_s:(kombi%2Csuv)"
+    interval_minutes: 15
+```
+
+The URL is scraped as-is, so every filter of every category works without
+the notifier having to know about it. `query`, `category_id`, `location`,
+`radius` and the price fields are ignored when `url` is set. From Telegram,
+simply paste such a URL into the chat (or use `/addurl`).
+
+#### Listings outside the search radius
+
+When a radius search has only a few hits, kleinanzeigen.de fills the page up
+with listings from further away. For watches with a radius (`location` +
+`radius`, or a `url` with a radius search), the notifier drops those itself:
+it uses the distance shown on the listing if there is one, otherwise it
+computes it from the listing's postal code to the watch's location (postal
+code or place name). Listings more than the radius plus a small tolerance
+(15 %, at least 5 km) away are ignored; listings whose distance can't be
+determined are always kept. Dropped listings are logged.
+
+The postal code coordinates come from [GeoNames](https://www.geonames.org)
+(CC BY 4.0). They're downloaded once on first use into `data/geo/` (a few
+MB); if that fails, it's retried hourly and only distances shown on the
+listings are used meanwhile. `NOTIFIER_GEONAMES_URL` overrides the source.
+
 Seen-ad state is kept per watch as a small JSON file under `data/` (mounted
 as a volume in `docker-compose.yml`), so it survives restarts/redeploys.
 
@@ -621,10 +655,18 @@ manual `config.yaml` editing needed:
   location, radius, price range, and check interval, then starts watching
   immediately. Category accepts a friendly name (auto, motorrad, fahrrad, ...)
   or a raw kleinanzeigen.de category id
+- **`/addurl [url]`** - add a watch from a kleinanzeigen.de search URL with
+  all the site's filters for that category (see above); only asks for a name
+  (with a suggestion) and the check interval. Pasting a search URL into the
+  chat does the same without any command. `/list` then shows the decoded
+  filters (e.g. `Marke: volkswagen · EZ: ab 2008 · Getriebe: automatik`) and a
+  link to open the search
 - **`/delete <number|name>`** - remove a watch (number from `/list`, or its
-  exact name)
-- **`/poll [number|name]`** - scrape right now instead of waiting for the
-  interval; polls every watch if no argument is given
+  name; part of the name works too as long as it matches only one watch)
+- **`/poll [number|name]`** (alias **`/pull`**) - scrape right now instead of
+  waiting for the interval. Part of a name is enough: `/pull subaru` polls
+  every watch whose name (or, failing that, its search) contains "subaru".
+  Polls every watch if no argument is given
 - **`/cancel`** - abort an in-progress `/add`
 - **`/help`** - list commands
 
@@ -672,6 +714,13 @@ docker compose up -d
 CI (`.github/workflows/ci.yml`) builds and pushes a multi-arch
 (`linux/amd64` + `linux/arm64`) image to GHCR on every push to `main`, so the
 Pi pulls a native arm64 image rather than emulating amd64.
+
+Pull requests from branches of this repo get an image too, tagged
+`pr-<number>`, to try a change on the Pi before merging: set
+`image: ghcr.io/theonlyloki/kleinanzeigen-notifier:pr-<number>` for `app` in
+`docker-compose.yml`, run `docker compose pull app && docker compose up -d app`,
+and switch back to `:main` once it's merged (Watchtower keeps following
+whichever tag is configured, including new pushes to the PR).
 
 **One-time GHCR step:** packages pushed via `GITHUB_TOKEN` default to
 *private*. Either make the package public (repo → Packages → package

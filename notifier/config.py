@@ -17,6 +17,10 @@ CONFIG_PATH = Path(os.environ.get("NOTIFIER_CONFIG", "config.yaml"))
 
 class WatchConfig(BaseModel):
     name: str
+    # A kleinanzeigen.de search URL with every filter already applied on the
+    # site (see notifier/search_url.py). When set, it's scraped as-is and the
+    # query/location/radius/price/category fields below are ignored.
+    url: Optional[str] = None
     query: Optional[str] = None
     location: Optional[str] = None
     radius: Optional[int] = None

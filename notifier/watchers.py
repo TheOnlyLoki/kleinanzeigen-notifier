@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from notifier.config import WatchConfig
+from notifier.geo import SearchArea, get_postal_geo, split_by_radius
+from notifier.search_url import url_search_area
 from notifier.storage import SeenAdsStore
+from scrapers.inserate_by_url import scrape_by_url
 from scrapers.inserate_ultra_optimized import ultra_optimized_scrape_inserate
 from utils.browser import OptimizedPlaywrightManager
 
@@ -34,29 +37,66 @@ class WatchEvent:
     old_price: Optional[int] = None
 
 
+async def _drop_outside_radius(
+    watch: WatchConfig, listings: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Few hits for a radius search make kleinanzeigen.de pad the page with
+    listings from further away - filter those out (see notifier/geo.py)."""
+    if watch.url:
+        candidates, radius = url_search_area(watch.url)
+    else:
+        candidates, radius = [watch.location] if watch.location else [], watch.radius
+    if not radius:
+        return listings
+
+    geo = await get_postal_geo()
+    center = None
+    if geo is not None:
+        center = next((c for c in map(geo.locate, candidates) if c is not None), None)
+        if center is None and candidates:
+            logger.debug(f"[{watch.name}] couldn't locate search center from {candidates}")
+
+    kept, dropped = split_by_radius(listings, SearchArea(radius, center), geo)
+    if dropped:
+        summary = ", ".join(f"{l.get('location')} ({d:.0f} km)" for l, d in dropped[:5])
+        logger.info(
+            f"[{watch.name}] ignored {len(dropped)} listing(s) outside {radius} km: {summary}"
+        )
+    return kept
+
+
 async def run_watch_once(
     browser_manager: OptimizedPlaywrightManager,
     watch: WatchConfig,
     store: SeenAdsStore,
 ) -> List[WatchEvent]:
-    response = await ultra_optimized_scrape_inserate(
-        browser_manager=browser_manager,
-        query=watch.query,
-        location=watch.location,
-        radius=watch.radius,
-        min_price=watch.min_price,
-        max_price=watch.max_price,
-        category_id=watch.category_id,
-        page_count=watch.page_count,
-    )
+    if watch.url:
+        response = await scrape_by_url(
+            browser_manager=browser_manager,
+            base_url=watch.url,
+            max_pages=watch.page_count,
+        )
+    else:
+        response = await ultra_optimized_scrape_inserate(
+            browser_manager=browser_manager,
+            query=watch.query,
+            location=watch.location,
+            radius=watch.radius,
+            min_price=watch.min_price,
+            max_price=watch.max_price,
+            category_id=watch.category_id,
+            page_count=watch.page_count,
+        )
 
     if not response.get("success", False):
         logger.warning(f"[{watch.name}] scrape failed: {response.get('error')}")
         return []
 
+    listings = await _drop_outside_radius(watch, response.get("results", []))
+
     events: List[WatchEvent] = []
 
-    for listing in response.get("results", []):
+    for listing in listings:
         adid = listing.get("adid")
         if not adid:
             continue
