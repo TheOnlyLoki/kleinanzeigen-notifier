@@ -619,6 +619,22 @@ the notifier having to know about it. `query`, `category_id`, `location`,
 `radius` and the price fields are ignored when `url` is set. From Telegram,
 simply paste such a URL into the chat (or use `/addurl`).
 
+#### Listings outside the search radius
+
+When a radius search has only a few hits, kleinanzeigen.de fills the page up
+with listings from further away. For watches with a radius (`location` +
+`radius`, or a `url` with a radius search), the notifier drops those itself:
+it uses the distance shown on the listing if there is one, otherwise it
+computes it from the listing's postal code to the watch's location (postal
+code or place name). Listings more than the radius plus a small tolerance
+(15 %, at least 5 km) away are ignored; listings whose distance can't be
+determined are always kept. Dropped listings are logged.
+
+The postal code coordinates come from [GeoNames](https://www.geonames.org)
+(CC BY 4.0). They're downloaded once on first use into `data/geo/` (a few
+MB); if that fails, it's retried hourly and only distances shown on the
+listings are used meanwhile. `NOTIFIER_GEONAMES_URL` overrides the source.
+
 Seen-ad state is kept per watch as a small JSON file under `data/` (mounted
 as a volume in `docker-compose.yml`), so it survives restarts/redeploys.
 

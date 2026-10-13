@@ -14,7 +14,7 @@ scrape it.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from utils.parse_kleinanzeigen_url import parse_kleinanzeigen_url
@@ -128,6 +128,26 @@ def describe_search_url(url: str, category_labels: Dict[int, str]) -> List[str]:
         parts.append(f"{_attr_label(key)}: {_format_attr_value(key, value)}")
 
     return parts
+
+
+def url_search_area(url: str) -> Tuple[List[str], Optional[int]]:
+    """(location candidates, radius in km) of a search URL; radius is None
+    when the URL has no radius search.
+
+    The site encodes the location as an opaque id (c216l2911r20), but its
+    URLs also carry the place as a readable slug - right after the category
+    (/s-autos/braunschweig/...), or as the slug itself when no category is
+    set (/s-braunschweig/...). Callers try the candidates in order against
+    a postal code / place table and use the first that resolves.
+    """
+    parsed = parse_kleinanzeigen_url(url)
+    candidates = [
+        parsed.get("location"),
+        parsed.get("subcategory"),
+        (parsed.get("category_slug") or "")[2:],
+        parsed.get("path_keyword"),
+    ]
+    return [c for c in candidates if c and ":" not in c], parsed.get("radius")
 
 
 def suggest_watch_name(url: str, category_labels: Dict[int, str]) -> str:
